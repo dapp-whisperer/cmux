@@ -133,6 +133,48 @@ final class AppDelegateWindowContextRoutingTests: XCTestCase {
         XCTAssertTrue(app.tabManager === manager)
     }
 
+    func testRegisterMainWindowReplacesContextManagerWhenWindowIdIsReused() {
+        _ = NSApplication.shared
+        let app = AppDelegate()
+
+        let windowId = UUID()
+        let firstWindow = makeMainWindow(id: windowId)
+        let secondWindow = makeMainWindow(id: windowId)
+        defer {
+            firstWindow.orderOut(nil)
+            secondWindow.orderOut(nil)
+        }
+
+        let firstManager = TabManager()
+        let secondManager = TabManager()
+
+        app.registerMainWindow(
+            firstWindow,
+            windowId: windowId,
+            tabManager: firstManager,
+            sidebarState: SidebarState(),
+            sidebarSelectionState: SidebarSelectionState()
+        )
+        XCTAssertTrue(app.tabManagerFor(windowId: windowId) === firstManager)
+
+        app.registerMainWindow(
+            secondWindow,
+            windowId: windowId,
+            tabManager: secondManager,
+            sidebarState: SidebarState(),
+            sidebarSelectionState: SidebarSelectionState()
+        )
+
+        XCTAssertTrue(app.tabManagerFor(windowId: windowId) === secondManager)
+
+        let firstCount = firstManager.tabs.count
+        let secondCount = secondManager.tabs.count
+        _ = app.addWorkspace(in: secondWindow, debugSource: "windowContext.reuse.test")
+
+        XCTAssertEqual(firstManager.tabs.count, firstCount, "Reused window context must not keep routing to the old manager")
+        XCTAssertEqual(secondManager.tabs.count, secondCount + 1, "Reused window context should route to the latest manager")
+    }
+
     func testAddWorkspaceWithoutBringToFrontPreservesActiveWindowAndSelection() {
         _ = NSApplication.shared
         let app = AppDelegate()

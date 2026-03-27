@@ -2323,6 +2323,7 @@ struct ContentView: View {
 
     private var sidebarView: some View {
         VerticalTabsSidebar(
+            windowId: windowId,
             updateViewModel: updateViewModel,
             onSendFeedback: presentFeedbackComposer,
             selection: $sidebarSelectionState.selection,
@@ -2428,6 +2429,7 @@ struct ContentView: View {
     @AppStorage("debugTitlebarLeadingExtra") private var debugTitlebarLeadingExtra: Double = 0
 
     @State private var titlebarLeadingInset: CGFloat = 12
+    @State private var titlebarLeadingInsetRefreshToken: UInt64 = 0
     private var windowIdentifier: String { "cmux.main.\(windowId.uuidString)" }
     private let titlebarFolderIconSize: CGFloat = 16
     private let titlebarFolderIconShift: CGFloat = -6
@@ -2441,6 +2443,24 @@ struct ContentView: View {
     private var titlebarFolderIconLayoutWidth: CGFloat {
         max(0, titlebarFolderIconSize + titlebarFolderIconShift)
     }
+
+    @MainActor
+    private func requestFullscreenWorkspaceCreation() {
+        cmuxWorkspaceCrashBreadcrumb(
+            "workspace.fullscreen-titlebar.button",
+            fields: ["windowId": windowId.uuidString]
+        )
+        AppDelegate.shared?.requestWorkspaceCreation(
+            windowId: windowId,
+            debugSource: "fullscreenTitlebar.newWorkspace"
+        )
+    }
+
+    @MainActor
+    private func scheduleTitlebarLeadingInsetRefresh() {
+        titlebarLeadingInsetRefreshToken &+= 1
+    }
+
     private var fullscreenControls: some View {
         TitlebarControlsView(
             notificationStore: TerminalNotificationStore.shared,
@@ -2452,7 +2472,7 @@ struct ContentView: View {
                     anchorView: fullscreenControlsViewModel.notificationsAnchorView
                 )
             },
-            onNewTab: { tabManager.addTab() },
+            onNewTab: requestFullscreenWorkspaceCreation,
             visibilityMode: .alwaysVisible
         )
     }
@@ -2463,7 +2483,10 @@ struct ContentView: View {
             // view draggable (which breaks drag gestures like tab reordering).
             WindowDragHandleView()
 
-            TitlebarLeadingInsetReader(inset: $titlebarLeadingInset)
+            TitlebarLeadingInsetReader(
+                inset: $titlebarLeadingInset,
+                refreshToken: titlebarLeadingInsetRefreshToken
+            )
                 .allowsHitTesting(false)
 
             HStack(spacing: 8) {
@@ -3083,6 +3106,13 @@ struct ContentView: View {
                 TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows()
             }
             updateSidebarResizerBandState()
+            scheduleTitlebarLeadingInsetRefresh()
+        })
+
+        view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: .cmuxTitlebarAccessoryLayoutDidChange)) { notification in
+            guard let window = notification.object as? NSWindow else { return }
+            guard observedWindow == nil || window === observedWindow else { return }
+            scheduleTitlebarLeadingInsetRefresh()
         })
 
         view = AnyView(view.onChange(of: sidebarState.persistedWidth) { newValue in
@@ -3112,23 +3142,31 @@ struct ContentView: View {
         })
 
         view = AnyView(view.background(WindowAccessor { [sidebarBlendMode, bgGlassEnabled, bgGlassTintHex, bgGlassTintOpacity] window in
-            window.identifier = NSUserInterfaceItemIdentifier(windowIdentifier)
-            window.titlebarAppearsTransparent = true
-            // cmux renders its own draggable folder/title chrome when the
-            // sidebar is hidden. Clear AppKit's native proxy icon so it
-            // never stacks on top of the custom titlebar content.
-            window.representedURL = nil
-            // Do not make the entire background draggable; it interferes with drag gestures
-            // like sidebar tab reordering in multi-window mode.
-            window.isMovableByWindowBackground = false
-            // Keep the window immovable by default so titlebar controls (like the folder icon)
-            // cannot accidentally initiate native window drags.
-            window.isMovable = false
-            window.styleMask.insert(.fullSizeContentView)
+            DispatchQueue.main.async {
+                window.identifier = NSUserInterfaceItemIdentifier(windowIdentifier)
+                if !window.titlebarAppearsTransparent {
+                    window.titlebarAppearsTransparent = true
+                }
+                // cmux renders its own draggable folder/title chrome when the
+                // sidebar is hidden. Clear AppKit's native proxy icon so it
+                // never stacks on top of the custom titlebar content.
+                window.representedURL = nil
+                // Do not make the entire background draggable; it interferes with drag gestures
+                // like sidebar tab reordering in multi-window mode.
+                if window.isMovableByWindowBackground {
+                    window.isMovableByWindowBackground = false
+                }
+                // Keep the window immovable by default so titlebar controls (like the folder icon)
+                // cannot accidentally initiate native window drags.
+                if window.isMovable {
+                    window.isMovable = false
+                }
+                if !window.styleMask.contains(.fullSizeContentView) {
+                    window.styleMask.insert(.fullSizeContentView)
+                }
 
-            // Track this window for fullscreen notifications
-            if observedWindow !== window {
-                DispatchQueue.main.async {
+                // Track this window for fullscreen notifications
+                if observedWindow !== window {
                     observedWindow = window
                     isFullScreen = window.styleMask.contains(.fullScreen)
                     clampSidebarWidthIfNeeded(availableWidth: window.contentView?.bounds.width ?? window.contentLayoutRect.width)
@@ -3136,64 +3174,62 @@ struct ContentView: View {
                     installSidebarResizerPointerMonitorIfNeeded()
                     updateSidebarResizerBandState()
                 }
-            }
 
-            // Keep content below the titlebar so drags on Bonsplit's tab bar don't
-            // get interpreted as window drags.
-            let computedTitlebarHeight = window.frame.height - window.contentLayoutRect.height
-            let nextPadding = max(28, min(72, computedTitlebarHeight))
-            if abs(titlebarPadding - nextPadding) > 0.5 {
-                DispatchQueue.main.async {
+                // Keep content below the titlebar so drags on Bonsplit's tab bar don't
+                // get interpreted as window drags.
+                let computedTitlebarHeight = window.frame.height - window.contentLayoutRect.height
+                let nextPadding = max(28, min(72, computedTitlebarHeight))
+                if abs(titlebarPadding - nextPadding) > 0.5 {
                     titlebarPadding = nextPadding
                 }
-            }
 #if DEBUG
-            if ProcessInfo.processInfo.environment["CMUX_UI_TEST_MODE"] == "1" {
-                UpdateLogStore.shared.append("ui test window accessor: id=\(windowIdentifier) visible=\(window.isVisible)")
-            }
-#endif
-            // Background glass: skip on macOS 26+ where NSGlassEffectView can cause blank
-            // or incorrectly tinted SwiftUI content. Keep native window rendering there so
-            // Ghostty theme colors remain authoritative.
-            let currentThemeBackground = GhosttyBackgroundTheme.currentColor()
-            let shouldApplyWindowGlassFallback =
-                sidebarBlendMode == SidebarBlendModeOption.behindWindow.rawValue
-                && bgGlassEnabled
-                && !WindowGlassEffect.isAvailable
-            let shouldForceTransparentHosting =
-                shouldApplyWindowGlassFallback || currentThemeBackground.alphaComponent < 0.999
-
-            if shouldForceTransparentHosting {
-                window.isOpaque = false
-                // Keep the window clear whenever translucency is active. Relying only on
-                // terminal focus-driven updates can leave stale opaque window fills.
-                window.backgroundColor = NSColor.white.withAlphaComponent(0.001)
-                // Configure contentView hierarchy for transparency.
-                if let contentView = window.contentView {
-                    makeViewHierarchyTransparent(contentView)
+                if ProcessInfo.processInfo.environment["CMUX_UI_TEST_MODE"] == "1" {
+                    UpdateLogStore.shared.append("ui test window accessor: id=\(windowIdentifier) visible=\(window.isVisible)")
                 }
-            } else {
-                // Browser-focused workspaces may not have an active terminal panel to refresh
-                // the NSWindow background. Keep opaque theme changes applied here as well.
-                window.backgroundColor = currentThemeBackground
-                window.isOpaque = currentThemeBackground.alphaComponent >= 0.999
-            }
+#endif
+                // Background glass: skip on macOS 26+ where NSGlassEffectView can cause blank
+                // or incorrectly tinted SwiftUI content. Keep native window rendering there so
+                // Ghostty theme colors remain authoritative.
+                let currentThemeBackground = GhosttyBackgroundTheme.currentColor()
+                let shouldApplyWindowGlassFallback =
+                    sidebarBlendMode == SidebarBlendModeOption.behindWindow.rawValue
+                    && bgGlassEnabled
+                    && !WindowGlassEffect.isAvailable
+                let shouldForceTransparentHosting =
+                    shouldApplyWindowGlassFallback || currentThemeBackground.alphaComponent < 0.999
 
-            if shouldApplyWindowGlassFallback {
-                // Apply liquid glass effect to the window with tint from settings
-                let tintColor = (NSColor(hex: bgGlassTintHex) ?? .black).withAlphaComponent(bgGlassTintOpacity)
-                WindowGlassEffect.apply(to: window, tintColor: tintColor)
+                if shouldForceTransparentHosting {
+                    window.isOpaque = false
+                    // Keep the window clear whenever translucency is active. Relying only on
+                    // terminal focus-driven updates can leave stale opaque window fills.
+                    window.backgroundColor = NSColor.white.withAlphaComponent(0.001)
+                    // Configure contentView hierarchy for transparency.
+                    if let contentView = window.contentView {
+                        makeViewHierarchyTransparent(contentView)
+                    }
+                } else {
+                    // Browser-focused workspaces may not have an active terminal panel to refresh
+                    // the NSWindow background. Keep opaque theme changes applied here as well.
+                    window.backgroundColor = currentThemeBackground
+                    window.isOpaque = currentThemeBackground.alphaComponent >= 0.999
+                }
+
+                if shouldApplyWindowGlassFallback {
+                    // Apply liquid glass effect to the window with tint from settings
+                    let tintColor = (NSColor(hex: bgGlassTintHex) ?? .black).withAlphaComponent(bgGlassTintOpacity)
+                    WindowGlassEffect.apply(to: window, tintColor: tintColor)
+                }
+                AppDelegate.shared?.attachUpdateAccessory(to: window)
+                AppDelegate.shared?.applyWindowDecorations(to: window)
+                AppDelegate.shared?.registerMainWindow(
+                    window,
+                    windowId: windowId,
+                    tabManager: tabManager,
+                    sidebarState: sidebarState,
+                    sidebarSelectionState: sidebarSelectionState
+                )
+                installFileDropOverlay(on: window, tabManager: tabManager)
             }
-            AppDelegate.shared?.attachUpdateAccessory(to: window)
-            AppDelegate.shared?.applyWindowDecorations(to: window)
-            AppDelegate.shared?.registerMainWindow(
-                window,
-                windowId: windowId,
-                tabManager: tabManager,
-                sidebarState: sidebarState,
-                sidebarSelectionState: sidebarSelectionState
-            )
-            installFileDropOverlay(on: window, tabManager: tabManager)
         }))
 
         return view
@@ -5154,6 +5190,8 @@ struct ContentView: View {
             return .splitRight
         case "palette.terminalSplitDown":
             return .splitDown
+        case "palette.openSelectedLinkOrPath":
+            return .openSelectedLinkOrPath
         case "palette.toggleSplitZoom":
             return .toggleSplitZoom
         case "palette.triggerFlash":
@@ -5875,6 +5913,15 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.openSelectedLinkOrPath",
+                title: constant(String(localized: "command.openSelectedLinkOrPath.title", defaultValue: "Open Selected Link or Path")),
+                subtitle: terminalPanelSubtitle,
+                keywords: ["terminal", "selection", "open", "path", "file", "link", "url"],
+                when: { $0.bool(CommandPaletteContextKeys.panelIsTerminal) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.terminalFind",
                 title: constant(String(localized: "command.terminalFind.title", defaultValue: "Find…")),
                 subtitle: terminalPanelSubtitle,
@@ -6298,6 +6345,18 @@ struct ContentView: View {
         registry.register(commandId: "palette.vscodeServeWebRestart") {
             if !restartInlineVSCodeServeWeb() {
                 NSSound.beep()
+            }
+        }
+        registry.register(commandId: "palette.openSelectedLinkOrPath") {
+            guard let panelContext = focusedPanelContext,
+                  panelContext.panel is TerminalPanel,
+                  AppDelegate.shared?.openSelectedTextInTerminal(
+                    tabManager: tabManager,
+                    workspaceId: panelContext.workspace.id,
+                    panelId: panelContext.panelId
+                  ) == true else {
+                NSSound.beep()
+                return
             }
         }
         registry.register(commandId: "palette.terminalFind") {
@@ -8481,6 +8540,7 @@ private struct SidebarResizerAccessibilityModifier: ViewModifier {
 }
 
 struct VerticalTabsSidebar: View {
+    let windowId: UUID
     @ObservedObject var updateViewModel: UpdateViewModel
     let onSendFeedback: () -> Void
     @EnvironmentObject var tabManager: TabManager
@@ -8627,7 +8687,10 @@ struct VerticalTabsSidebar: View {
                 }
                 .overlay(alignment: .topLeading) {
                     if isMinimalMode {
-                        HiddenTitlebarSidebarControlsView(notificationStore: notificationStore)
+                        HiddenTitlebarSidebarControlsView(
+                            windowId: windowId,
+                            notificationStore: notificationStore
+                        )
                             .padding(.leading, hiddenTitlebarControlsLeadingInset)
                             .padding(.top, 2)
                     }
@@ -11614,6 +11677,7 @@ private struct TabItemView: View, Equatable {
             isHovering = hovering
         }
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("SidebarWorkspaceRow.\(tab.id.uuidString)")
         .accessibilityLabel(Text(accessibilityTitle))
         .accessibilityHint(Text(accessibilityHintText))
         .accessibilityAction(named: Text(moveUpActionText)) {
@@ -13716,6 +13780,7 @@ final class TitlebarLeadingInsetPassthroughView: NSView {
 
 private struct TitlebarLeadingInsetReader: NSViewRepresentable {
     @Binding var inset: CGFloat
+    let refreshToken: UInt64
 
     func makeNSView(context: Context) -> NSView {
         let view = TitlebarLeadingInsetPassthroughView()
@@ -13724,21 +13789,29 @@ private struct TitlebarLeadingInsetReader: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        _ = refreshToken
         DispatchQueue.main.async {
             guard let window = nsView.window else { return }
-            // Start past the traffic lights
-            var leading: CGFloat = 78
-            // Add width of all left-aligned titlebar accessories
-            for accessory in window.titlebarAccessoryViewControllers
-                where accessory.layoutAttribute == .leading || accessory.layoutAttribute == .left {
-                leading += accessory.view.frame.width
-            }
-            leading += 0
+            window.contentView?.layoutSubtreeIfNeeded()
+            window.contentView?.superview?.layoutSubtreeIfNeeded()
+            let leading = resolvedTitlebarLeadingInset(for: window)
             if leading != inset {
                 inset = leading
             }
         }
     }
+}
+
+func resolvedTitlebarLeadingInset(for window: NSWindow) -> CGFloat {
+    var leading: CGFloat = 78
+    for accessory in window.titlebarAccessoryViewControllers
+        where (accessory.layoutAttribute == .leading || accessory.layoutAttribute == .left) && !accessory.isHidden {
+        let measuredWidth = max(accessory.view.frame.width, accessory.preferredContentSize.width)
+        if measuredWidth > 0 {
+            leading += measuredWidth
+        }
+    }
+    return leading
 }
 
 private struct SidebarBackdrop: View {

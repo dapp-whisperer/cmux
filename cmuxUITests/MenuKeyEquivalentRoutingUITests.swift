@@ -51,6 +51,27 @@ final class MenuKeyEquivalentRoutingUITests: XCTestCase {
         )
     }
 
+    func testTitlebarNewWorkspaceButtonCreatesWorkspaceWithoutCrash() {
+        let app = launchWithBrowserSetup()
+
+        let newWorkspaceButton = app.buttons["titlebarControl.newTab"]
+        XCTAssertTrue(
+            waitForCondition(timeout: 5.0) {
+                newWorkspaceButton.exists && newWorkspaceButton.isHittable
+            },
+            "Expected the titlebar new-workspace button to be visible and clickable"
+        )
+
+        let baseline = loadKeyequiv()["addTabInvocations"].flatMap(Int.init) ?? 0
+        newWorkspaceButton.click()
+
+        XCTAssertTrue(
+            waitForKeyequivInt(key: "addTabInvocations", toBeAtLeast: baseline + 1, timeout: 5.0),
+            "Expected clicking the titlebar new-workspace button to create a workspace without crashing the app"
+        )
+        XCTAssertEqual(app.state, .runningForeground, "Expected app to remain running after clicking the titlebar new-workspace button")
+    }
+
     func testCmdWWorksWhenWebViewFocusedAfterTabSwitch() {
         let app = launchWithBrowserSetup()
 

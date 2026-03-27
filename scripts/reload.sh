@@ -17,11 +17,10 @@ LAST_SOCKET_PATH_FILE="${LAST_SOCKET_PATH_DIR}/last-socket-path"
 
 write_dev_cli_shim() {
   local target="$1"
-  local fallback_bin="$2"
   mkdir -p "$(dirname "$target")"
   cat > "$target" <<EOF
 #!/usr/bin/env bash
-# cmux dev shim (managed by scripts/reload.sh)
+# cmux source-build shim (managed by scripts/reload.sh)
 set -euo pipefail
 
 CLI_PATH_FILE="/tmp/cmux-last-cli-path"
@@ -33,11 +32,11 @@ if [[ -r "\$CLI_PATH_FILE" ]] && [[ ! -L "\$CLI_PATH_FILE" ]] && [[ "\$CLI_PATH_
   fi
 fi
 
-if [[ -x "$fallback_bin" ]]; then
-  exec "$fallback_bin" "\$@"
+if [[ -x "/tmp/cmux-cli" ]] && [[ ! -L "/tmp/cmux-cli" || "\$(readlink "/tmp/cmux-cli" 2>/dev/null || true)" != "$target" ]]; then
+  exec "/tmp/cmux-cli" "\$@"
 fi
 
-echo "error: no reload-selected dev cmux CLI found. Run ./scripts/reload.sh --tag <name> first." >&2
+echo "error: no reload-selected source cmux CLI found. Run ./scripts/reload.sh --tag <name> first." >&2
 exit 1
 EOF
   chmod +x "$target"
@@ -412,11 +411,11 @@ if [[ -x "$CLI_PATH" ]]; then
 
   # Stable shim that always follows the last reload-selected dev CLI.
   DEV_CLI_SHIM="$HOME/.local/bin/cmux-dev"
-  write_dev_cli_shim "$DEV_CLI_SHIM" "/Applications/cmux.app/Contents/Resources/bin/cmux"
+  write_dev_cli_shim "$DEV_CLI_SHIM"
 
   CMUX_SHIM_TARGET="$(select_cmux_shim_target || true)"
   if [[ -n "${CMUX_SHIM_TARGET:-}" ]]; then
-    write_dev_cli_shim "$CMUX_SHIM_TARGET" "/Applications/cmux.app/Contents/Resources/bin/cmux"
+    write_dev_cli_shim "$CMUX_SHIM_TARGET"
   fi
 fi
 

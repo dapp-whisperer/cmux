@@ -9,27 +9,174 @@ import Combine
 import ObjectiveC.runtime
 import Darwin
 
-final class MainWindowHostingView<Content: View>: NSHostingView<Content> {
-    private let zeroSafeAreaLayoutGuide = NSLayoutGuide()
+private let cmuxWorkspaceCrashBreadcrumbsURL = URL(fileURLWithPath: "/tmp/cmux-workspace-crash-breadcrumbs.log")
 
+private let cmuxWorkspaceCrashBreadcrumbsPathPointerURL = URL(fileURLWithPath: "/tmp/cmux-last-workspace-crash-log-path")
+
+private let cmuxWorkspaceCrashBreadcrumbsFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+}()
+
+func cmuxWorkspaceCrashBreadcrumb(_ event: String, fields: [String: String] = [:]) {
+    var line = "[\(cmuxWorkspaceCrashBreadcrumbsFormatter.string(from: Date()))] \(event)"
+    if !fields.isEmpty {
+        let payload = fields
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value.replacingOccurrences(of: "\n", with: "\\n"))" }
+            .joined(separator: " ")
+        line += " \(payload)"
+    }
+    line += "\n"
+
+    if let data = line.data(using: .utf8) {
+        if !FileManager.default.fileExists(atPath: cmuxWorkspaceCrashBreadcrumbsURL.path) {
+            FileManager.default.createFile(atPath: cmuxWorkspaceCrashBreadcrumbsURL.path, contents: nil)
+        }
+        if let handle = try? FileHandle(forWritingTo: cmuxWorkspaceCrashBreadcrumbsURL) {
+            do {
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+                try handle.close()
+            } catch {
+                try? handle.close()
+            }
+        }
+        try? cmuxWorkspaceCrashBreadcrumbsURL.path.write(to: cmuxWorkspaceCrashBreadcrumbsPathPointerURL, atomically: true, encoding: .utf8)
+    }
+}
+
+final class MainWindowHostingView<Content: View>: NSHostingView<Content> {
     override var safeAreaInsets: NSEdgeInsets { NSEdgeInsetsZero }
-    override var safeAreaRect: NSRect { bounds }
-    override var safeAreaLayoutGuide: NSLayoutGuide { zeroSafeAreaLayoutGuide }
 
     required init(rootView: Content) {
         super.init(rootView: rootView)
-        addLayoutGuide(zeroSafeAreaLayoutGuide)
-        NSLayoutConstraint.activate([
-            zeroSafeAreaLayoutGuide.leadingAnchor.constraint(equalTo: leadingAnchor),
-            zeroSafeAreaLayoutGuide.trailingAnchor.constraint(equalTo: trailingAnchor),
-            zeroSafeAreaLayoutGuide.topAnchor.constraint(equalTo: topAnchor),
-            zeroSafeAreaLayoutGuide.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+}
+
+enum TerminalSelectionOpenResolver {
+    static func resolve(_ rawSelection: String, baseDirectory: String?) -> TerminalOpenURLTarget? {
+        let candidates = normalizedCandidates(from: rawSelection)
+        guard !candidates.isEmpty else { return nil }
+
+        for candidate in candidates {
+            if hasExplicitScheme(candidate) || NSString(string: candidate).isAbsolutePath {
+                if let target = resolveTerminalOpenURLTarget(candidate) {
+                    return target
+                }
+            }
+        }
+
+        for candidate in candidates {
+            if let fileURL = resolveExistingPath(candidate, baseDirectory: baseDirectory) {
+                return .external(fileURL)
+            }
+        }
+
+        for candidate in candidates {
+            if let target = resolveTerminalOpenURLTarget(candidate) {
+                return target
+            }
+        }
+
+        return nil
+    }
+
+    private static func normalizedCandidates(from rawSelection: String) -> [String] {
+        var candidates: [String] = []
+
+        func append(_ candidate: String?) {
+            guard let candidate else { return }
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            guard !candidates.contains(trimmed) else { return }
+            candidates.append(trimmed)
+        }
+
+        let trimmed = rawSelection.trimmingCharacters(in: .whitespacesAndNewlines)
+        append(trimmed)
+
+        let unwrapped = stripWrappingDelimiters(from: trimmed)
+        append(unwrapped)
+
+        append(stripLineSuffix(from: trimmed))
+        append(stripLineSuffix(from: unwrapped))
+
+        return candidates
+    }
+
+    private static func stripWrappingDelimiters(from value: String) -> String {
+        let pairs: [(Character, Character)] = [
+            ("\"", "\""),
+            ("'", "'"),
+            ("`", "`"),
+            ("<", ">"),
+            ("(", ")"),
+            ("[", "]"),
+            ("{", "}"),
+        ]
+
+        var result = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        while result.count >= 2,
+              let first = result.first,
+              let last = result.last,
+              pairs.contains(where: { $0.0 == first && $0.1 == last }) {
+            result.removeFirst()
+            result.removeLast()
+            result = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return result
+    }
+
+    private static func stripLineSuffix(from value: String) -> String? {
+        var candidate = value
+        var stripped = false
+
+        for _ in 0..<2 {
+            let parts = candidate.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count >= 2,
+                  let lastPart = parts.last,
+                  !lastPart.isEmpty,
+                  lastPart.allSatisfy(\.isNumber) else {
+                break
+            }
+            candidate = parts.dropLast().joined(separator: ":")
+            stripped = true
+        }
+
+        return stripped ? candidate : nil
+    }
+
+    private static func resolveExistingPath(_ candidate: String, baseDirectory: String?) -> URL? {
+        let fileManager = FileManager.default
+        let trimmedBaseDirectory = baseDirectory?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let basePath = trimmedBaseDirectory.isEmpty ? fileManager.currentDirectoryPath : trimmedBaseDirectory
+        let baseURL = URL(fileURLWithPath: basePath, isDirectory: true)
+        let expandedCandidate = NSString(string: candidate).expandingTildeInPath
+
+        let url: URL
+        if NSString(string: expandedCandidate).isAbsolutePath {
+            url = URL(fileURLWithPath: expandedCandidate)
+        } else {
+            url = URL(fileURLWithPath: expandedCandidate, relativeTo: baseURL)
+        }
+
+        let standardized = url.standardizedFileURL
+        guard fileManager.fileExists(atPath: standardized.path) else { return nil }
+        return standardized
+    }
+
+    private static func hasExplicitScheme(_ value: String) -> Bool {
+        value.range(
+            of: #"^[A-Za-z][A-Za-z0-9+.-]*:"#,
+            options: .regularExpression
+        ) != nil
     }
 }
 
@@ -2002,9 +2149,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private final class MainWindowContext {
         let windowId: UUID
-        let tabManager: TabManager
-        let sidebarState: SidebarState
-        let sidebarSelectionState: SidebarSelectionState
+        var tabManager: TabManager
+        var sidebarState: SidebarState
+        var sidebarSelectionState: SidebarSelectionState
         weak var window: NSWindow?
 
         init(
@@ -3886,8 +4033,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let priorManagerToken = debugManagerToken(self.tabManager)
         #endif
         if let existing = mainWindowContexts[key] {
+            existing.tabManager = tabManager
+            existing.sidebarState = sidebarState
+            existing.sidebarSelectionState = sidebarSelectionState
             existing.window = window
         } else if let existing = mainWindowContexts.values.first(where: { $0.windowId == windowId }) {
+            existing.tabManager = tabManager
+            existing.sidebarState = sidebarState
+            existing.sidebarSelectionState = sidebarSelectionState
             existing.window = window
             reindexMainWindowContextIfNeeded(existing, for: window)
         } else {
@@ -4460,17 +4613,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     @discardableResult
-    func addWorkspace(windowId: UUID, workingDirectory: String? = nil, bringToFront shouldBringToFront: Bool = false) -> UUID? {
+    func addWorkspace(
+        windowId: UUID,
+        workingDirectory: String? = nil,
+        bringToFront shouldBringToFront: Bool = false,
+        debugSource: String = "unspecified"
+    ) -> UUID? {
         guard let state = scriptableMainWindow(windowId: windowId) else { return nil }
-        if shouldBringToFront, let window = state.window {
-            setActiveMainWindow(window)
-            bringToFront(window)
+        if let window = state.window {
+            return addWorkspace(
+                in: window,
+                workingDirectory: workingDirectory,
+                shouldBringToFront: shouldBringToFront,
+                debugSource: debugSource
+            )
         }
-        let workspace = state.tabManager.addWorkspace(
+
+        guard let context = mainWindowContexts.values.first(where: { $0.windowId == windowId }) else {
+            return nil
+        }
+        return createWorkspace(
+            in: context,
             workingDirectory: workingDirectory,
-            select: shouldBringToFront
+            shouldBringToFront: shouldBringToFront,
+            event: nil,
+            debugSource: debugSource
         )
-        return workspace.id
+    }
+
+    @discardableResult
+    func requestWorkspaceCreation(
+        windowId: UUID? = nil,
+        workingDirectory: String? = nil,
+        shouldBringToFront: Bool = false,
+        debugSource: String = "unspecified"
+    ) -> UUID? {
+        cmuxWorkspaceCrashBreadcrumb(
+            "workspace.request",
+            fields: [
+                "source": debugSource,
+                "windowId": windowId?.uuidString ?? "nil",
+                "workingDirectory": workingDirectory ?? "nil",
+                "bringToFront": shouldBringToFront ? "1" : "0",
+            ]
+        )
+        if let windowId,
+           let workspaceId = addWorkspace(
+               windowId: windowId,
+               workingDirectory: workingDirectory,
+               bringToFront: shouldBringToFront,
+               debugSource: debugSource
+           ) {
+            cmuxWorkspaceCrashBreadcrumb(
+                "workspace.request.resolved-windowId",
+                fields: [
+                    "source": debugSource,
+                    "workspaceId": workspaceId.uuidString,
+                ]
+            )
+            return workspaceId
+        }
+        if let workspaceId = addWorkspaceInPreferredMainWindow(
+            workingDirectory: workingDirectory,
+            shouldBringToFront: shouldBringToFront,
+            debugSource: debugSource
+        ) {
+            cmuxWorkspaceCrashBreadcrumb(
+                "workspace.request.resolved-preferred-window",
+                fields: [
+                    "source": debugSource,
+                    "workspaceId": workspaceId.uuidString,
+                ]
+            )
+            return workspaceId
+        }
+        cmuxWorkspaceCrashBreadcrumb(
+            "workspace.request.open-new-window",
+            fields: ["source": debugSource]
+        )
+        openNewMainWindow(nil)
+        return nil
     }
 
     private func markCommandPaletteOpenRequested(for window: NSWindow?) {
@@ -4789,6 +5011,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         return nil
+    }
+
+    @discardableResult
+    func openResolvedTerminalTarget(
+        _ target: TerminalOpenURLTarget,
+        sourceWorkspaceId: UUID,
+        sourcePanelId: UUID
+    ) -> Bool {
+        if !BrowserLinkOpenSettings.openTerminalLinksInCmuxBrowser() {
+            return NSWorkspace.shared.open(target.url)
+        }
+
+        switch target {
+        case let .external(url):
+            return NSWorkspace.shared.open(url)
+        case let .embeddedBrowser(url):
+            if BrowserLinkOpenSettings.shouldOpenExternally(url) {
+                return NSWorkspace.shared.open(url)
+            }
+            guard let host = BrowserInsecureHTTPSettings.normalizeHost(url.host ?? "") else {
+                return NSWorkspace.shared.open(url)
+            }
+            if !BrowserLinkOpenSettings.hostMatchesWhitelist(host) {
+                return NSWorkspace.shared.open(url)
+            }
+            guard let resolved = workspaceContainingPanel(
+                panelId: sourcePanelId,
+                preferredWorkspaceId: sourceWorkspaceId
+            ) else {
+                return false
+            }
+            let workspace = resolved.workspace
+            if let targetPane = workspace.preferredBrowserTargetPane(fromPanelId: sourcePanelId) {
+                return workspace.newBrowserSurface(inPane: targetPane, url: url, focus: true) != nil
+            }
+            return workspace.newBrowserSplit(
+                from: sourcePanelId,
+                orientation: .horizontal,
+                url: url
+            ) != nil
+        }
     }
 
     func locateGhosttySurface(_ surface: ghostty_surface_t?) -> (windowId: UUID, workspaceId: UUID, panelId: UUID, tabManager: TabManager)? {
@@ -5400,6 +5663,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
     }
 
+    @discardableResult
+    func openSelectedTextInTerminal(
+        tabManager: TabManager,
+        workspaceId: UUID,
+        panelId: UUID
+    ) -> Bool {
+        guard let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }),
+              let terminalPanel = workspace.panels[panelId] as? TerminalPanel,
+              let selectedText = terminalPanel.selectedText() else {
+            return false
+        }
+
+        let baseDirectory = workspace.panelDirectories[panelId] ?? workspace.currentDirectory
+        guard let target = TerminalSelectionOpenResolver.resolve(
+            selectedText,
+            baseDirectory: baseDirectory
+        ) else {
+            return false
+        }
+
+        return openResolvedTerminalTarget(
+            target,
+            sourceWorkspaceId: workspace.id,
+            sourcePanelId: panelId
+        )
+    }
+
+    @discardableResult
+    private func openSelectedTextInFocusedTerminal(preferredWindow: NSWindow? = nil) -> Bool {
+        guard let context = focusedTerminalShortcutContext(preferredWindow: preferredWindow) else {
+            return false
+        }
+        return openSelectedTextInTerminal(
+            tabManager: context.tabManager,
+            workspaceId: context.workspaceId,
+            panelId: context.panelId
+        )
+    }
+
     private func preferredMainWindowContextForShortcuts(event: NSEvent) -> MainWindowContext? {
         if let context = contextForMainWindow(event.window) {
             return context
@@ -5614,36 +5916,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     @discardableResult
-    func addWorkspaceInPreferredMainWindow(
+    func addWorkspace(
+        in window: NSWindow,
         workingDirectory: String? = nil,
         shouldBringToFront: Bool = false,
-        event: NSEvent? = nil,
         debugSource: String = "unspecified"
     ) -> UUID? {
+        cmuxWorkspaceCrashBreadcrumb(
+            "workspace.add-window",
+            fields: [
+                "source": debugSource,
+                "windowNumber": String(window.windowNumber),
+                "windowTitle": window.title,
+                "workingDirectory": workingDirectory ?? "nil",
+                "bringToFront": shouldBringToFront ? "1" : "0",
+            ]
+        )
         #if DEBUG
         logWorkspaceCreationRouting(
             phase: "request",
             source: debugSource,
             reason: "add_workspace",
-            event: event,
+            event: nil,
             chosenContext: nil,
             workingDirectory: workingDirectory
         )
         #endif
-        guard let context = preferredMainWindowContextForWorkspaceCreation(event: event, debugSource: debugSource) else {
+        guard let context = contextForMainTerminalWindow(window) else {
+            cmuxWorkspaceCrashBreadcrumb(
+                "workspace.add-window.no-context",
+                fields: [
+                    "source": debugSource,
+                    "windowNumber": String(window.windowNumber),
+                ]
+            )
             #if DEBUG
             logWorkspaceCreationRouting(
                 phase: "no_context",
                 source: debugSource,
-                reason: "context_selection_failed",
-                event: event,
+                reason: "window_context_missing",
+                event: nil,
                 chosenContext: nil,
                 workingDirectory: workingDirectory
             )
             #endif
             return nil
         }
+        return createWorkspace(
+            in: context,
+            workingDirectory: workingDirectory,
+            shouldBringToFront: shouldBringToFront,
+            event: nil,
+            debugSource: debugSource
+        )
+    }
+
+    @discardableResult
+    private func createWorkspace(
+        in context: MainWindowContext,
+        workingDirectory: String?,
+        shouldBringToFront: Bool,
+        event: NSEvent?,
+        debugSource: String
+    ) -> UUID? {
+        cmuxWorkspaceCrashBreadcrumb(
+            "workspace.create-context",
+            fields: [
+                "source": debugSource,
+                "windowId": context.windowId.uuidString,
+                "workingDirectory": workingDirectory ?? "nil",
+                "bringToFront": shouldBringToFront ? "1" : "0",
+            ]
+        )
         guard let window = resolvedWindow(for: context) else {
+            cmuxWorkspaceCrashBreadcrumb(
+                "workspace.create-context.window-missing",
+                fields: [
+                    "source": debugSource,
+                    "windowId": context.windowId.uuidString,
+                ]
+            )
             #if DEBUG
             logWorkspaceCreationRouting(
                 phase: "no_context",
@@ -5664,10 +6016,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         let workspace: Workspace
         if let workingDirectory {
+            cmuxWorkspaceCrashBreadcrumb(
+                "workspace.create-context.addWorkspace",
+                fields: [
+                    "source": debugSource,
+                    "windowId": context.windowId.uuidString,
+                    "workingDirectory": workingDirectory,
+                ]
+            )
             workspace = context.tabManager.addWorkspace(workingDirectory: workingDirectory, select: true)
         } else {
+            cmuxWorkspaceCrashBreadcrumb(
+                "workspace.create-context.addTab",
+                fields: [
+                    "source": debugSource,
+                    "windowId": context.windowId.uuidString,
+                ]
+            )
             workspace = context.tabManager.addTab(select: true)
         }
+        cmuxWorkspaceCrashBreadcrumb(
+            "workspace.create-context.created",
+            fields: [
+                "source": debugSource,
+                "windowId": context.windowId.uuidString,
+                "workspaceId": workspace.id.uuidString,
+            ]
+        )
         #if DEBUG
         logWorkspaceCreationRouting(
             phase: "created",
@@ -5680,6 +6055,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
         #endif
         return workspace.id
+    }
+
+    @discardableResult
+    func addWorkspaceInPreferredMainWindow(
+        workingDirectory: String? = nil,
+        shouldBringToFront: Bool = false,
+        event: NSEvent? = nil,
+        debugSource: String = "unspecified"
+    ) -> UUID? {
+        cmuxWorkspaceCrashBreadcrumb(
+            "workspace.add-preferred-window",
+            fields: [
+                "source": debugSource,
+                "workingDirectory": workingDirectory ?? "nil",
+                "bringToFront": shouldBringToFront ? "1" : "0",
+                "hasEvent": event == nil ? "0" : "1",
+            ]
+        )
+        #if DEBUG
+        logWorkspaceCreationRouting(
+            phase: "request",
+            source: debugSource,
+            reason: "add_workspace",
+            event: event,
+            chosenContext: nil,
+            workingDirectory: workingDirectory
+        )
+        #endif
+        guard let context = preferredMainWindowContextForWorkspaceCreation(event: event, debugSource: debugSource) else {
+            cmuxWorkspaceCrashBreadcrumb(
+                "workspace.add-preferred-window.no-context",
+                fields: ["source": debugSource]
+            )
+            #if DEBUG
+            logWorkspaceCreationRouting(
+                phase: "no_context",
+                source: debugSource,
+                reason: "context_selection_failed",
+                event: event,
+                chosenContext: nil,
+                workingDirectory: workingDirectory
+            )
+            #endif
+            return nil
+        }
+        return createWorkspace(
+            in: context,
+            workingDirectory: workingDirectory,
+            shouldBringToFront: shouldBringToFront,
+            event: event,
+            debugSource: debugSource
+        )
     }
 
     private func preferredMainWindowContextForWorkspaceCreation(
@@ -9547,6 +9974,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             // Only consume when a focused terminal actually handled the toggle.
             // Otherwise allow the event to continue through the responder chain.
             return handled
+        }
+
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .openSelectedLinkOrPath)) {
+            let targetWindow = event.window ?? NSApp.keyWindow ?? NSApp.mainWindow
+            guard focusedTerminalShortcutContext(preferredWindow: targetWindow) != nil else {
+                return false
+            }
+            let handled = openSelectedTextInFocusedTerminal(preferredWindow: targetWindow)
+#if DEBUG
+            dlog(
+                "shortcut.action name=openSelectedLinkOrPath handled=\(handled ? 1 : 0) " +
+                "\(debugShortcutRouteSnapshot(event: event))"
+            )
+#endif
+            if !handled {
+                NSSound.beep()
+            }
+            return true
         }
 
         // Workspace navigation: Cmd+Ctrl+] / Cmd+Ctrl+[

@@ -30,6 +30,7 @@ enum KeyboardShortcutSettings {
         case closeWorkspace
         case newSurface
         case toggleTerminalCopyMode
+        case openSelectedLinkOrPath
 
         // Panes / splits
         case focusLeft
@@ -71,6 +72,7 @@ enum KeyboardShortcutSettings {
             case .closeWorkspace: return String(localized: "shortcut.closeWorkspace.label", defaultValue: "Close Workspace")
             case .newSurface: return String(localized: "shortcut.newSurface.label", defaultValue: "New Surface")
             case .toggleTerminalCopyMode: return String(localized: "shortcut.toggleTerminalCopyMode.label", defaultValue: "Toggle Terminal Copy Mode")
+            case .openSelectedLinkOrPath: return String(localized: "shortcut.openSelectedLinkOrPath.label", defaultValue: "Open Selected Link or Path")
             case .focusLeft: return String(localized: "shortcut.focusPaneLeft.label", defaultValue: "Focus Pane Left")
             case .focusRight: return String(localized: "shortcut.focusPaneRight.label", defaultValue: "Focus Pane Right")
             case .focusUp: return String(localized: "shortcut.focusPaneUp.label", defaultValue: "Focus Pane Up")
@@ -107,6 +109,7 @@ enum KeyboardShortcutSettings {
             case .focusRight: return "shortcut.focusRight"
             case .focusUp: return "shortcut.focusUp"
             case .focusDown: return "shortcut.focusDown"
+            case .openSelectedLinkOrPath: return "shortcut.openSelectedLinkOrPath"
             case .splitRight: return "shortcut.splitRight"
             case .splitDown: return "shortcut.splitDown"
             case .toggleSplitZoom: return "shortcut.toggleSplitZoom"
@@ -181,6 +184,8 @@ enum KeyboardShortcutSettings {
                 return StoredShortcut(key: "t", command: true, shift: false, option: false, control: false)
             case .toggleTerminalCopyMode:
                 return StoredShortcut(key: "m", command: true, shift: true, option: false, control: false)
+            case .openSelectedLinkOrPath:
+                return StoredShortcut(key: "o", command: true, shift: true, option: false, control: false)
             case .selectWorkspaceByNumber:
                 return StoredShortcut(key: "1", command: true, shift: false, option: false, control: false)
             case .openBrowser:
