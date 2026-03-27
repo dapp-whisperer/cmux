@@ -17773,6 +17773,23 @@
         }
       }
     },
+    "command.openSelectedLinkOrPath.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Selected Link or Path"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択したリンクまたはパスを開く"
+          }
+        }
+      }
+    },
     "command.openSettings.subtitle": {
       "extractionState": "manual",
       "localizations": {
@@ -62018,6 +62035,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Klasör Aç"
+          }
+        }
+      }
+    },
+    "shortcut.openSelectedLinkOrPath.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Selected Link or Path"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択したリンクまたはパスを開く"
           }
         }
       }

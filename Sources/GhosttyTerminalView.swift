@@ -4049,6 +4049,10 @@ final class TerminalSurface: Identifiable, ObservableObject {
         return ghostty_surface_has_selection(surface)
     }
 
+    func selectedText() -> String? {
+        surfaceView.selectedText()
+    }
+
 #if DEBUG
     @MainActor
     func setNeedsConfirmCloseOverrideForTesting(_ value: Bool?) {
@@ -5069,8 +5073,13 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     override func accessibilitySelectedText() -> String? {
+        selectedText()
+    }
+
+    func selectedText() -> String? {
         guard let snapshot = readSelectionSnapshot() else { return nil }
-        return snapshot.string.isEmpty ? nil : snapshot.string
+        let trimmed = snapshot.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func readSelectionSnapshot() -> SelectionSnapshot? {

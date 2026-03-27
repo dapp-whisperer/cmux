@@ -203,6 +203,10 @@ final class TerminalPanel: Panel, ObservableObject {
         surface.hasSelection()
     }
 
+    func selectedText() -> String? {
+        surface.selectedText()
+    }
+
     func needsConfirmClose() -> Bool {
         surface.needsConfirmClose()
     }

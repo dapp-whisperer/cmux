@@ -40,6 +40,16 @@
 | `./scripts/reload2.sh` | Reload both Debug and Release |
 | `./scripts/rebuild.sh` | Clean rebuild |
 
+To replace the downloaded `/Applications/cmux.app` with a source-built Release app
+that keeps the normal app identity and removes the Debug banner, run:
+
+```bash
+./scripts/reloadp.sh --install
+```
+
+The first time this runs, it backs up the existing app to
+`/Applications/cmux.downloaded.app`.
+
 ## Rebuilding GhosttyKit
 
 If you make changes to the ghostty submodule, rebuild the xcframework:
@@ -62,6 +72,43 @@ ssh cmux-vm 'cd /Users/cmux/GhosttyTabs && xcodebuild -project GhosttyTabs.xcode
 ```bash
 ssh cmux-vm 'cd /Users/cmux/GhosttyTabs && xcodebuild -project GhosttyTabs.xcodeproj -scheme cmux -configuration Debug -destination "platform=macOS" -only-testing:cmuxUITests test'
 ```
+
+### Targeted local UI tests
+
+Use targeted local UI runs when you need to debug a specific macOS regression on your machine. Keep the scope narrow rather than running the whole suite.
+
+```bash
+./scripts/run-ui-test-local.sh MenuKeyEquivalentRoutingUITests/testTitlebarNewWorkspaceButtonCreatesWorkspaceWithoutCrash
+```
+
+Artifacts are written under `/tmp/cmux-ui-local/...` unless you pass `--artifacts-dir`.
+
+### Local macOS smoke automation
+
+Use the smoke helper to exercise a live app build end-to-end through Accessibility APIs and capture screenshots plus crash artifacts.
+
+Tagged Debug build:
+
+```bash
+./scripts/mac-smoke.sh --app debug --scenario titlebar-new-workspace --tag local-smoke
+```
+
+Installed Release app:
+
+```bash
+./scripts/mac-smoke.sh --app release --scenario titlebar-new-workspace
+```
+
+Rebuild and reinstall the source-built Release app first:
+
+```bash
+./scripts/mac-smoke.sh --app release --scenario titlebar-new-workspace --reinstall-release
+```
+
+Notes:
+- `mac-smoke.sh` writes artifacts under `/tmp/cmux-smoke/...` by default.
+- Accessibility is required for the terminal/agent process running the helper.
+- Screenshot capture may also require Screen Recording permission.
 
 ## Ghostty Submodule
 

@@ -7,6 +7,21 @@ final class NonDraggableHostingView<Content: View>: NSHostingView<Content> {
     override var mouseDownCanMoveWindow: Bool { false }
 }
 
+@MainActor
+private func requestNewWorkspaceFromAppDelegate(windowId: UUID? = nil, debugSource: String) {
+    cmuxWorkspaceCrashBreadcrumb(
+        "workspace.titlebar.request-app-delegate",
+        fields: [
+            "source": debugSource,
+            "windowId": windowId?.uuidString ?? "nil",
+        ]
+    )
+    AppDelegate.shared?.requestWorkspaceCreation(
+        windowId: windowId,
+        debugSource: debugSource
+    )
+}
+
 enum TitlebarControlsStyle: Int, CaseIterable, Identifiable {
     case classic
     case compact
@@ -121,6 +136,7 @@ final class TitlebarControlsViewModel: ObservableObject {
 
 extension Notification.Name {
     static let cmuxNotificationsPopoverVisibilityDidChange = Notification.Name("cmux.notificationsPopoverVisibilityDidChange")
+    static let cmuxTitlebarAccessoryLayoutDidChange = Notification.Name("cmux.titlebarAccessoryLayoutDidChange")
 }
 
 private enum NotificationsPopoverVisibilityUserInfoKey {
@@ -132,6 +148,14 @@ private func postNotificationsPopoverVisibilityDidChange(isShown: Bool) {
         name: .cmuxNotificationsPopoverVisibilityDidChange,
         object: nil,
         userInfo: [NotificationsPopoverVisibilityUserInfoKey.isShown: isShown]
+    )
+}
+
+private func postTitlebarAccessoryLayoutDidChange(window: NSWindow?) {
+    guard let window else { return }
+    NotificationCenter.default.post(
+        name: .cmuxTitlebarAccessoryLayoutDidChange,
+        object: window
     )
 }
 
@@ -548,6 +572,7 @@ struct TitlebarControlsView: View {
 }
 
 struct HiddenTitlebarSidebarControlsView: View {
+    let windowId: UUID
     @ObservedObject var notificationStore: TerminalNotificationStore
     @StateObject private var viewModel = TitlebarControlsViewModel()
 
@@ -565,7 +590,16 @@ struct HiddenTitlebarSidebarControlsView: View {
                     anchorView: viewModel.notificationsAnchorView
                 )
             },
-            onNewTab: { _ = AppDelegate.shared?.tabManager?.addTab() },
+            onNewTab: {
+                cmuxWorkspaceCrashBreadcrumb(
+                    "workspace.hidden-titlebar.button",
+                    fields: ["windowId": windowId.uuidString]
+                )
+                requestNewWorkspaceFromAppDelegate(
+                    windowId: windowId,
+                    debugSource: "hiddenTitlebar.newWorkspace"
+                )
+            },
             visibilityMode: .onHover
         )
         .frame(width: hostWidth, height: hostHeight, alignment: .leading)
@@ -780,29 +814,42 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
     private var cachedFittingSize: NSSize?
     private var lastObservedViewSize: NSSize = .zero
     private var lastAppliedLayoutSnapshot: TitlebarControlsLayoutSnapshot?
-    private let viewModel = TitlebarControlsViewModel()
+    private let viewModel: TitlebarControlsViewModel
     private var userDefaultsObserver: NSObjectProtocol?
     var popoverIsShownForTesting: Bool { notificationsPopover.isShown }
     private var showsWorkspaceTitlebar: Bool { !WorkspacePresentationModeSettings.isMinimal() }
 
     init(notificationStore: TerminalNotificationStore) {
         self.notificationStore = notificationStore
+        let viewModel = TitlebarControlsViewModel()
+        self.viewModel = viewModel
         let toggleSidebar = { _ = AppDelegate.shared?.sidebarState?.toggle() }
         let toggleNotifications: () -> Void = { _ = AppDelegate.shared?.toggleNotificationsPopover(animated: true) }
-        let newTab = { _ = AppDelegate.shared?.tabManager?.addTab() }
-
-        hostingView = NonDraggableHostingView(
-            rootView: TitlebarControlsView(
+        let fallbackNewTab: () -> Void = {
+            requestNewWorkspaceFromAppDelegate(debugSource: "titlebar.newWorkspace.fallback")
+        }
+        func makeRootView(onNewTab: @escaping () -> Void) -> TitlebarControlsView {
+            TitlebarControlsView(
                 notificationStore: notificationStore,
                 viewModel: viewModel,
                 onToggleSidebar: toggleSidebar,
                 onToggleNotifications: toggleNotifications,
-                onNewTab: newTab,
+                onNewTab: onNewTab,
                 visibilityMode: .alwaysVisible
             )
+        }
+
+        hostingView = NonDraggableHostingView(
+            rootView: makeRootView(onNewTab: fallbackNewTab)
         )
 
         super.init(nibName: nil, bundle: nil)
+
+        let newTab: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.createWorkspaceFromAttachedWindow()
+        }
+        hostingView.rootView = makeRootView(onNewTab: newTab)
 
         view = containerView
         containerView.translatesAutoresizingMaskIntoConstraints = true
@@ -826,6 +873,32 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
 
         applyWorkspaceTitlebarVisibility()
         scheduleSizeUpdate(invalidateFittingSize: true)
+    }
+
+    @MainActor
+    private func createWorkspaceFromAttachedWindow() {
+        cmuxWorkspaceCrashBreadcrumb(
+            "workspace.attached-titlebar.button",
+            fields: [
+                "windowNumber": view.window.map { String($0.windowNumber) } ?? "nil",
+            ]
+        )
+        guard let appDelegate = AppDelegate.shared else { return }
+        if let window = view.window,
+           appDelegate.addWorkspace(in: window, debugSource: "titlebar.newWorkspace") != nil {
+            cmuxWorkspaceCrashBreadcrumb(
+                "workspace.attached-titlebar.button.resolved-window",
+                fields: ["windowNumber": String(window.windowNumber)]
+            )
+            return
+        }
+        cmuxWorkspaceCrashBreadcrumb(
+            "workspace.attached-titlebar.button.fallback",
+            fields: [
+                "windowNumber": view.window.map { String($0.windowNumber) } ?? "nil",
+            ]
+        )
+        requestNewWorkspaceFromAppDelegate(debugSource: "titlebar.newWorkspace.fallback")
     }
 
     required init?(coder: NSCoder) {
@@ -914,6 +987,7 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
         preferredContentSize = NSSize(width: contentSize.width, height: containerHeight)
         containerView.frame = NSRect(x: 0, y: 0, width: contentSize.width, height: containerHeight)
         hostingView.frame = NSRect(x: 0, y: yOffset, width: contentSize.width, height: contentSize.height)
+        postTitlebarAccessoryLayoutDidChange(window: view.window)
     }
 
     private func applyWorkspaceTitlebarVisibility() {
@@ -924,6 +998,7 @@ final class TitlebarControlsAccessoryViewController: NSTitlebarAccessoryViewCont
             containerView.frame = .zero
             hostingView.frame = .zero
         }
+        postTitlebarAccessoryLayoutDidChange(window: view.window)
     }
 
     func toggleNotificationsPopover(animated: Bool = true, externalAnchor: NSView? = nil) {
@@ -1222,7 +1297,10 @@ final class UpdateTitlebarAccessoryController {
     }
 
     func attach(to window: NSWindow) {
-        attachIfNeeded(to: window)
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.attachIfNeeded(to: window)
+        }
     }
 
     private func installObservers() {
@@ -1359,6 +1437,7 @@ final class UpdateTitlebarAccessoryController {
             window.contentView?.layoutSubtreeIfNeeded()
             window.contentView?.superview?.layoutSubtreeIfNeeded()
             window.invalidateShadow()
+            postTitlebarAccessoryLayoutDidChange(window: window)
         }
 
 #if DEBUG

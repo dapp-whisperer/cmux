@@ -87,6 +87,18 @@ cd cmuxd && zig build -Doptimize=ReleaseFast
 ./scripts/reloadp.sh
 ```
 
+To replace the downloaded `/Applications/cmux.app` with a source-built Release app, use:
+
+```bash
+./scripts/reloadp.sh --install
+```
+
+This keeps the normal `cmux.app` identity and stores the first downloaded app backup at:
+
+```bash
+/Applications/cmux.downloaded.app
+```
+
 `reloads` = kill and launch the Release app as "cmux STAGING" (isolated from production cmux):
 
 ```bash
@@ -180,12 +192,15 @@ This makes it visible in the GitHub PR UI (Commits tab, check statuses) that the
 
 ## Testing policy
 
-**Never run tests locally.** All tests (E2E, UI, python socket tests) run via GitHub Actions or on the VM.
+Avoid running full test suites locally by default. E2E, broad UI suites, and python socket suites still prefer GitHub Actions or the VM.
 
 - **E2E / UI tests:** trigger via `gh workflow run test-e2e.yml` (see cmuxterm-hq CLAUDE.md for details)
+- **Targeted local UI tests:** allowed when explicitly debugging a local regression. Use `./scripts/run-ui-test-local.sh <cmuxUITests filter>` and keep the run narrow.
+- **Targeted local smoke runs:** allowed for live-app validation. Use `./scripts/mac-smoke.sh --app debug|release --scenario titlebar-new-workspace` and collect artifacts from `/tmp/cmux-smoke/...`.
 - **Unit tests:** `xcodebuild -scheme cmux-unit` is safe (no app launch), but prefer CI
 - **Python socket tests (tests_v2/):** these connect to a running cmux instance's socket. Never launch an untagged `cmux DEV.app` to run them. If you must test locally, use a tagged build's socket (`/tmp/cmux-debug-<tag>.sock`) with `CMUX_SOCKET=/tmp/cmux-debug-<tag>.sock`
 - **Never `open` an untagged `cmux DEV.app`** from DerivedData. It conflicts with the user's running debug instance.
+- **Local macOS automation prerequisites:** Accessibility is required for `mac-smoke.sh`; screenshots may also require Screen Recording permission for the invoking terminal/agent process.
 
 ## Ghostty submodule workflow
 

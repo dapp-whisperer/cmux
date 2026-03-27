@@ -135,6 +135,76 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
         XCTAssertEqual(secondManager.tabs.count, secondCount + 1, "Workspace creation should target key/main window context")
     }
 
+    func testAddWorkspaceInSpecificWindowIgnoresStaleTabManagerPointer() {
+        guard let appDelegate = AppDelegate.shared else {
+            XCTFail("Expected AppDelegate.shared")
+            return
+        }
+
+        let firstWindowId = appDelegate.createMainWindow()
+        let secondWindowId = appDelegate.createMainWindow()
+
+        defer {
+            closeWindow(withId: firstWindowId)
+            closeWindow(withId: secondWindowId)
+        }
+
+        guard let firstManager = appDelegate.tabManagerFor(windowId: firstWindowId),
+              let secondManager = appDelegate.tabManagerFor(windowId: secondWindowId),
+              let secondWindow = window(withId: secondWindowId) else {
+            XCTFail("Expected both window contexts to exist")
+            return
+        }
+
+        let firstCount = firstManager.tabs.count
+        let secondCount = secondManager.tabs.count
+
+        secondWindow.makeKeyAndOrderFront(nil)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        appDelegate.tabManager = firstManager
+        XCTAssertTrue(appDelegate.tabManager === firstManager)
+
+        _ = appDelegate.addWorkspace(in: secondWindow, debugSource: "titlebar.newWorkspace.test")
+
+        XCTAssertEqual(firstManager.tabs.count, firstCount, "Titlebar workspace creation must not route to a stale active manager")
+        XCTAssertEqual(secondManager.tabs.count, secondCount + 1, "Titlebar workspace creation should target the accessory window context")
+        XCTAssertTrue(appDelegate.tabManager === secondManager, "Expected exact-window routing to activate the clicked window's manager")
+    }
+
+    func testAddWorkspaceByWindowIdIgnoresStaleTabManagerPointer() {
+        guard let appDelegate = AppDelegate.shared else {
+            XCTFail("Expected AppDelegate.shared")
+            return
+        }
+
+        let firstWindowId = appDelegate.createMainWindow()
+        let secondWindowId = appDelegate.createMainWindow()
+
+        defer {
+            closeWindow(withId: firstWindowId)
+            closeWindow(withId: secondWindowId)
+        }
+
+        guard let firstManager = appDelegate.tabManagerFor(windowId: firstWindowId),
+              let secondManager = appDelegate.tabManagerFor(windowId: secondWindowId) else {
+            XCTFail("Expected both window contexts to exist")
+            return
+        }
+
+        let firstCount = firstManager.tabs.count
+        let secondCount = secondManager.tabs.count
+
+        appDelegate.tabManager = firstManager
+        XCTAssertTrue(appDelegate.tabManager === firstManager)
+
+        _ = appDelegate.addWorkspace(windowId: secondWindowId, debugSource: "titlebar.newWorkspace.windowId.test")
+
+        XCTAssertEqual(firstManager.tabs.count, firstCount, "Window-id workspace creation must not route to a stale active manager")
+        XCTAssertEqual(secondManager.tabs.count, secondCount + 1, "Window-id workspace creation should target the requested window context")
+        XCTAssertTrue(appDelegate.tabManager === secondManager, "Expected window-id routing to activate the requested window's manager")
+    }
+
     func testCmdNResolvesEventWindowWhenObjectKeyLookupIsMismatched() {
         guard let appDelegate = AppDelegate.shared else {
             XCTFail("Expected AppDelegate.shared")
@@ -983,6 +1053,27 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
         XCTAssertEqual(
             defaults.string(forKey: WorkspaceButtonFadeSettings.modeKey),
             WorkspaceButtonFadeSettings.Mode.disabled.rawValue
+        )
+    }
+
+    func testResolvedTitlebarLeadingInsetUsesAccessoryPreferredWidthWhenFrameIsZero() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.layoutAttribute = .left
+        accessory.preferredContentSize = NSSize(width: 124, height: 28)
+        accessory.view = NSView(frame: .zero)
+
+        window.addTitlebarAccessoryViewController(accessory)
+
+        XCTAssertEqual(
+            resolvedTitlebarLeadingInset(for: window),
+            202,
+            accuracy: 0.5
         )
     }
 

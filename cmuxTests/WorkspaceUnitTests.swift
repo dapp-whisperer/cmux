@@ -297,9 +297,20 @@ final class WorkspaceCreationPlacementTests: XCTestCase {
     private final class SnapshotMutatingTabManager: TabManager {
         var afterCaptureWorkspaceCreationSnapshot: (() -> Void)?
         var beforeCreateWorkspace: (() -> Void)?
+        var inheritedConfigTemplate: ghostty_surface_config_s?
+        var lastCapturedConfigTemplateFontSize: Float?
 
         override func didCaptureWorkspaceCreationSnapshot() {
             afterCaptureWorkspaceCreationSnapshot?()
+        }
+
+        override func inheritedTerminalConfigForWorkspaceCreationSource(
+            _ workspace: Workspace?
+        ) -> ghostty_surface_config_s? {
+            if let inheritedConfigTemplate {
+                return inheritedConfigTemplate
+            }
+            return super.inheritedTerminalConfigForWorkspaceCreationSource(workspace)
         }
 
         override func makeWorkspaceForCreation(
@@ -311,6 +322,7 @@ final class WorkspaceCreationPlacementTests: XCTestCase {
             initialTerminalEnvironment: [String: String]
         ) -> Workspace {
             beforeCreateWorkspace?()
+            lastCapturedConfigTemplateFontSize = configTemplate?.font_size
             return super.makeWorkspaceForCreation(
                 title: title,
                 workingDirectory: workingDirectory,
@@ -446,6 +458,40 @@ final class WorkspaceCreationPlacementTests: XCTestCase {
         XCTAssertEqual(manager.tabs.map(\.id), [first.id, second.id, inserted.id])
         XCTAssertFalse(manager.tabs.contains(where: { $0.id == third.id }))
         XCTAssertEqual(manager.selectedTabId, inserted.id)
+    }
+
+    func testAddWorkspaceAfterCurrentKeepsPinnedPlacementFromSnapshotWhenPinnedStateMutatesAfterSnapshot() {
+        let manager = SnapshotMutatingTabManager()
+        guard let first = manager.tabs.first else {
+            XCTFail("Expected initial workspace")
+            return
+        }
+
+        let second = manager.addWorkspace()
+        let third = manager.addWorkspace()
+        manager.setPinned(first, pinned: true)
+        manager.setPinned(second, pinned: true)
+        manager.selectWorkspace(first)
+
+        manager.afterCaptureWorkspaceCreationSnapshot = {
+            manager.setPinned(second, pinned: false)
+        }
+
+        let inserted = manager.addWorkspace(placementOverride: .afterCurrent)
+
+        XCTAssertEqual(manager.tabs.map(\.id), [first.id, second.id, inserted.id, third.id])
+        XCTAssertEqual(manager.selectedTabId, inserted.id)
+    }
+
+    func testAddWorkspacePassesInheritedConfigCapturedOutsideSnapshotStorage() {
+        let manager = SnapshotMutatingTabManager()
+        var inheritedConfig = ghostty_surface_config_new()
+        inheritedConfig.font_size = 19
+        manager.inheritedConfigTemplate = inheritedConfig
+
+        _ = manager.addWorkspace()
+
+        XCTAssertEqual(manager.lastCapturedConfigTemplateFontSize, 19)
     }
 
     private func makeManagerWithThreeWorkspaces() -> TabManager {
