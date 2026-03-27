@@ -2429,12 +2429,17 @@ struct ContentView: View {
 
     @State private var titlebarLeadingInset: CGFloat = 12
     private var windowIdentifier: String { "cmux.main.\(windowId.uuidString)" }
+    private let titlebarFolderIconSize: CGFloat = 16
+    private let titlebarFolderIconShift: CGFloat = -6
     private var fakeTitlebarTextColor: Color {
         _ = titlebarThemeGeneration
         let ghosttyBackground = GhosttyApp.shared.defaultBackgroundColor
         return ghosttyBackground.isLightColor
             ? Color.black.opacity(0.78)
             : Color.white.opacity(0.82)
+    }
+    private var titlebarFolderIconLayoutWidth: CGFloat {
+        max(0, titlebarFolderIconSize + titlebarFolderIconShift)
     }
     private var fullscreenControls: some View {
         TitlebarControlsView(
@@ -2469,7 +2474,10 @@ struct ContentView: View {
                 // Draggable folder icon + focused command name
                 if let directory = focusedDirectory {
                     DraggableFolderIcon(directory: directory)
-                        .padding(.leading, -6)
+                        // Keep the visual nudge without shrinking the HStack slot.
+                        // Negative padding here makes the title text overlap the icon.
+                        .frame(width: titlebarFolderIconLayoutWidth, alignment: .leading)
+                        .offset(x: titlebarFolderIconShift)
                 }
 
                 Text(titlebarText)
@@ -3106,6 +3114,10 @@ struct ContentView: View {
         view = AnyView(view.background(WindowAccessor { [sidebarBlendMode, bgGlassEnabled, bgGlassTintHex, bgGlassTintOpacity] window in
             window.identifier = NSUserInterfaceItemIdentifier(windowIdentifier)
             window.titlebarAppearsTransparent = true
+            // cmux renders its own draggable folder/title chrome when the
+            // sidebar is hidden. Clear AppKit's native proxy icon so it
+            // never stacks on top of the custom titlebar content.
+            window.representedURL = nil
             // Do not make the entire background draggable; it interferes with drag gestures
             // like sidebar tab reordering in multi-window mode.
             window.isMovableByWindowBackground = false
